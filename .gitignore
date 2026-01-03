@@ -1,7 +1,40 @@
-.env
+# Python
 __pycache__/
-*.pyc
-.DS_Store
-venv/
+*.py[cod]
+*$py.class
+*.so
+.Python
 env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Secrets and configs
+.env
+*.env
+secrets.py
+config_secret.py
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
 *.log
+logs/
+
+# Bothost
+data/
+*.db
+*.sqlite3
+
+# Temp files
+*.tmp
+*.temp

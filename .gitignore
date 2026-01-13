@@ -1,26 +1,38 @@
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
+*.py[cod]
+*$py.class
 *.so
-*.db
-.env
-*.sqlite3
-*.log
-instance/
-.venv/
+.Python
+env/
 venv/
 ENV/
-env/
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-*.backup*
-*.patch
+
+# Database
+*.db
+*.sqlite3
+*.db-journal
+
+# Environment - ВАЖНО!
 .env
-# Конфигурации
-config.py
+.env.local
+.env.*.local
+
+# GitHub токены и секреты
+*.token
 *.key
-*.pem
+*.secret
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Bot logs
+*.log
+logs/

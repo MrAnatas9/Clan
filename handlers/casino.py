@@ -361,6 +361,8 @@ def setup_casino_handlers(application):
         ],
         states={
             CASINO_BET_AMOUNT: [
+                CallbackQueryHandler(casino_menu, pattern='^back$'),
+                CallbackQueryHandler(casino_menu, pattern='^casino_menu$'),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, casino_process_bet),
             ],
         },

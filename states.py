@@ -1,4 +1,6 @@
 # ========== СОСТОЯНИЯ ==========
+
+# Определяем все состояния как кортеж
 (
     ASKING_NICKNAME, ASKING_SOURCE, SELECTING_JOBS,
     CONFIRM_REGISTRATION, TRANSFER_AMOUNT, TRANSFER_USERNAME,
@@ -15,10 +17,28 @@
     PAY_CREDIT_AMOUNT, GROUP_CASINO_BET, SELL_CHARACTER_PRICE
 ) = range(40)
 
-# Функции для работы с категориями (исправленные)
+# Но также нужно экспортировать их как отдельные переменные
+# Делаем их глобальными
+__all__ = [
+    'ASKING_NICKNAME', 'ASKING_SOURCE', 'SELECTING_JOBS',
+    'CONFIRM_REGISTRATION', 'TRANSFER_AMOUNT', 'TRANSFER_USERNAME',
+    'VIEWING_APPLICATIONS', 'REQUESTING_CREDIT_AMOUNT', 'REQUESTING_CREDIT_REASON',
+    'ADMIN_SEARCH_USER', 'ADMIN_MANAGE_USER', 'ADMIN_BAN_REASON',
+    'ADMIN_ADD_MONEY', 'CREATING_TASK_TITLE', 'CREATING_TASK_DESC',
+    'CREATING_TASK_REWARD_COINS', 'CREATING_TASK_REWARD_EXP', 'CREATING_TASK_DEADLINE',
+    'CASINO_BET_AMOUNT', 'RP_CHARACTER_NAME', 'RP_CHARACTER_ABILITIES',
+    'RP_CHARACTER_WEAKNESSES', 'RP_CHARACTER_ITEMS', 'RP_CHARACTER_BIO',
+    'QUOTA_WORK_DONE', 'QUOTA_EVENTS', 'QUOTA_RP_PLAYED', 'QUOTA_PROOF',
+    'VIEWING_TASKS', 'COMPLETING_TASK', 'ADMIN_RP_APPROVE_PRICE',
+    'VACATION_DAYS', 'VACATION_REASON', 'SUGGESTION_TEXT',
+    'CHANGE_NICKNAME', 'CHANGE_JOB_SELECTION', 'REQUEST_BONUS_REASON',
+    'PAY_CREDIT_AMOUNT', 'GROUP_CASINO_BET', 'SELL_CHARACTER_PRICE',
+    'get_categories', 'get_jobs_by_category'
+]
+
+# Функции для работы с категориями
 def get_categories():
     """Получает уникальные категории работ"""
-    # Импортируем JOBS_DETAILS здесь, чтобы избежать циклического импорта
     from database import JOBS_DETAILS
     categories = set()
     for job_details in JOBS_DETAILS.values():

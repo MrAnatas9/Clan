@@ -6,7 +6,14 @@ from datetime import datetime, timezone, timedelta
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from groq import Groq
-from config import TELEGRAM_TOKEN, GROQ_API_KEY, ADMIN_ID, ADMIN_NAME, GROQ_MODEL, BOT_USERNAME
+
+# Ключи напрямую в коде
+TELEGRAM_TOKEN = "8626951455:AAED7EIVu45vrpDxFkMDzVHYh7ymK77WWgw"
+GROQ_API_KEY = "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"
+ADMIN_ID = 6495178643
+ADMIN_NAME = "Анатас"
+GROQ_MODEL = "llama-3.3-70b-versatile"
+BOT_USERNAME = "@agent_bot"
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 

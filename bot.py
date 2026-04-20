@@ -1,7 +1,3 @@
-import os
-from dotenv import load_dotenv
-load_dotenv()
-
 import logging
 import requests
 import re
@@ -10,15 +6,10 @@ from datetime import datetime, timezone, timedelta
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from groq import Groq
-
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "6495178643"))
-ADMIN_NAME = "Анатас"
-GROQ_MODEL = "llama-3.3-70b-versatile"
-BOT_USERNAME = "@agent_bot"
+from config import TELEGRAM_TOKEN, GROQ_API_KEY, ADMIN_ID, ADMIN_NAME, GROQ_MODEL, BOT_USERNAME
 
 groq_client = Groq(api_key=GROQ_API_KEY)
+
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 

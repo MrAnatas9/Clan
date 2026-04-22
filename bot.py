@@ -1,4 +1,5 @@
 import logging
+import sys
 import requests
 import re
 import random
@@ -6,14 +7,29 @@ from datetime import datetime, timezone, timedelta
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from groq import Groq
-import os
+import traceback
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = "8626951455:AAED7EIVu45vrpDxFkMDzVHYh7ymK77WWgw"
 GROQ_API_KEY = "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"
 ADMIN_ID = 6495178643
 
-groq_client = Groq(api_key=GROQ_API_KEY)
-logging.basicConfig(level=logging.INFO)
+logger.info("🚀 Бот запускается...")
+logger.info(f"Токен: {TELEGRAM_TOKEN[:10]}...")
+
+try:
+    groq_client = Groq(api_key=GROQ_API_KEY)
+    logger.info("✅ Groq клиент создан")
+except Exception as e:
+    logger.error(f"❌ Ошибка Groq: {e}")
+
 MSK = timezone(timedelta(hours=3))
 
 USERS = {
@@ -45,13 +61,22 @@ async def me(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"{user['name']}, {user['role']}, реп {user['reputation']}")
 
 def main():
-    print("🚀 Бот запущен на Render.com")
+    logger.info("🔄 Создаём приложение...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
+    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("who", who))
     app.add_handler(CommandHandler("me", me))
-    app.run_polling()
+    
+    logger.info("✅ Обработчики добавлены")
+    logger.info("🚀 Запускаем polling...")
+    app.run_polling(allowed_updates=["message", "callback_query"])
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка: {e}")
+        traceback.print_exc()
+        sys.exit(1)

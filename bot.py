@@ -5,11 +5,7 @@ import re
 import random
 from datetime import datetime, timezone, timedelta
 from flask import Flask, request
-from telegram import Update, Bot
-from telegram.ext import Dispatcher, CommandHandler, MessageHandler, filters
 from groq import Groq
-import threading
-import time
 
 # Конфигурация
 TELEGRAM_TOKEN = "8626951455:AAED7EIVu45vrpDxFkMDzVHYh7ymK77WWgw"
@@ -21,12 +17,7 @@ GROQ_MODEL = "llama-3.3-70b-versatile"
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Flask приложение
 app = Flask(__name__)
-bot = Bot(token=TELEGRAM_TOKEN)
-dispatcher = Dispatcher(bot, None, use_context=True)
-
-# Время
 MSK = timezone(timedelta(hours=3))
 bot_active = True
 
@@ -42,10 +33,9 @@ USERS = {
     "7839738821": {"name": "Принцесс", "role": "новичок", "reputation": 75}
 }
 
-# Инициализация Groq
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# === РЕАКЦИИ ===
+# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
 def get_reaction_emoji(text):
     if any(w in text.lower() for w in ["смех", "хаха", "шутка"]):
         return "😂"
@@ -57,7 +47,6 @@ def get_reaction_emoji(text):
         return "❤️"
     return None
 
-# === ПОИСК ===
 def search_web(query):
     try:
         url = "https://api.duckduckgo.com/"
@@ -79,7 +68,6 @@ def get_weather(city):
         pass
     return None
 
-# === AI ОТВЕТ ===
 def get_ai_response(user_text, user_name, is_admin=False):
     try:
         admin_prefix = "ВНИМАНИЕ: Это АНАТАС - твой создатель!" if is_admin else ""
@@ -105,109 +93,112 @@ def get_ai_response(user_text, user_name, is_admin=False):
         logger.error(f"AI ошибка: {e}")
         return "Не понял"
 
-# === ОБРАБОТЧИКИ КОМАНД ===
-async def start(update, context):
-    await update.message.reply_text("🤖 Агент Ада здесь! Пиши /help")
+def send_message(chat_id, text):
+    """Отправка сообщения через Telegram API"""
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text}
+    try:
+        requests.post(url, json=payload)
+    except Exception as e:
+        logger.error(f"Ошибка отправки: {e}")
 
-async def help_cmd(update, context):
-    await update.message.reply_text("""Команды:
-/start - начать
-/help - помощь
-/who - участники
-/me - моё досье
+def send_reaction(chat_id, message_id, emoji):
+    """Отправка реакции"""
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setMessageReaction"
+    payload = {"chat_id": chat_id, "message_id": message_id, "reaction": [{"type": "emoji", "emoji": emoji}]}
+    try:
+        requests.post(url, json=payload)
+    except:
+        pass
 
-Анатас: молчать, говорить, репутацию [имя] [число]""")
-
-async def who(update, context):
-    text = "📊 Участники:\n"
-    for uid, data in USERS.items():
-        text += f"• {data['name']} - {data['role']}, реп {data['reputation']}\n"
-    await update.message.reply_text(text)
-
-async def me(update, context):
-    uid = str(update.message.from_user.id)
-    user = USERS.get(uid, {"name": update.message.from_user.first_name, "role": "новичок", "reputation": 50})
-    await update.message.reply_text(f"{user['name']}, {user['role']}, реп {user['reputation']}")
-
-async def handle_message(update, context):
-    user_id = str(update.message.from_user.id)
-    user_name = update.message.from_user.first_name
-    user_text = update.message.text
+def process_message(chat_id, user_id, user_name, text, message_id):
+    """Обработка сообщения"""
+    global bot_active
+    
+    if not bot_active:
+        return
     
     # Админ-команды
     if user_id == str(ADMIN_ID):
-        if user_text.lower() in ["молчать", "молчи"]:
-            global bot_active
+        if text.lower() in ["молчать", "молчи"]:
             bot_active = False
-            await update.message.reply_text("😶 Молчу")
+            send_message(chat_id, "😶 Молчу")
             return
-        if user_text.lower() in ["говорить", "проснись"]:
+        if text.lower() in ["говорить", "проснись"]:
             bot_active = True
-            await update.message.reply_text("✅ Я здесь")
+            send_message(chat_id, "✅ Я здесь")
             return
         
-        match = re.search(r'репутацию\s+(\w+)\s+(\d+)', user_text.lower())
+        match = re.search(r'репутацию\s+(\w+)\s+(\d+)', text.lower())
         if match:
             name = match.group(1)
             new_rep = int(match.group(2))
             for uid, data in USERS.items():
                 if data["name"].lower() == name:
                     USERS[uid]["reputation"] = new_rep
-                    await update.message.reply_text(f"✅ Репутация {name} изменена на {new_rep}")
+                    send_message(chat_id, f"✅ Репутация {name} изменена на {new_rep}")
                     return
     
-    if not bot_active:
-        return
-    
     # Реакция
-    reaction = get_reaction_emoji(user_text)
+    reaction = get_reaction_emoji(text)
     if reaction:
-        try:
-            await update.message.reply_text(reaction)
-        except:
-            pass
+        send_reaction(chat_id, message_id, reaction)
     
     # Быстрые команды
-    if user_text.lower() in ["дата", "какое сегодня число"]:
-        await update.message.reply_text(datetime.now(MSK).strftime("%d.%m.%Y"))
+    if text.lower() in ["дата", "какое сегодня число"]:
+        send_message(chat_id, datetime.now(MSK).strftime("%d.%m.%Y"))
         return
-    if user_text.lower() in ["время", "который час"]:
-        await update.message.reply_text(datetime.now(MSK).strftime("%H:%M"))
+    if text.lower() in ["время", "который час"]:
+        send_message(chat_id, datetime.now(MSK).strftime("%H:%M"))
         return
-    if "погода" in user_text.lower():
-        city_match = re.search(r'погода\s+в\s+(\w+)', user_text.lower())
+    if text.lower() == "кто я":
+        user = USERS.get(user_id, {"name": user_name, "role": "новичок", "reputation": 50})
+        send_message(chat_id, f"Ты {user['name']}, {user['role']}, реп {user['reputation']}")
+        return
+    if text.lower() == "кто ты":
+        send_message(chat_id, "Я Агент Ада, ИИ-помощник")
+        return
+    if "погода" in text.lower():
+        city_match = re.search(r'погода\s+в\s+(\w+)', text.lower())
         city = city_match.group(1) if city_match else "Москва"
         weather = get_weather(city)
         if weather:
-            await update.message.reply_text(weather)
+            send_message(chat_id, weather)
             return
     
     # Поиск
     search_info = None
-    if any(w in user_text.lower() for w in ["найди", "что такое", "кто такой", "новости"]):
-        search_info = search_web(user_text)
+    if any(w in text.lower() for w in ["найди", "что такое", "кто такой", "новости"]):
+        search_info = search_web(text)
     
     is_admin = (user_id == str(ADMIN_ID))
-    response = get_ai_response(user_text, user_name, is_admin)
-    await update.message.reply_text(response)
+    response = get_ai_response(text, user_name, is_admin)
+    send_message(chat_id, response)
 
-# Регистрация обработчиков
-dispatcher.add_handler(CommandHandler("start", start))
-dispatcher.add_handler(CommandHandler("help", help_cmd))
-dispatcher.add_handler(CommandHandler("who", who))
-dispatcher.add_handler(CommandHandler("me", me))
-dispatcher.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-# === ФЛАСК СЕРВЕР ===
+# === ФЛАСК ВЕБХУК ===
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        update = Update.de_json(request.get_json(force=True), bot)
-        dispatcher.process_update(update)
+        data = request.get_json()
+        if not data:
+            return 'ok', 200
+        
+        # Обработка сообщения
+        if 'message' in data:
+            msg = data['message']
+            chat_id = str(msg['chat']['id'])
+            user_id = str(msg['from']['id'])
+            user_name = msg['from'].get('first_name', 'User')
+            text = msg.get('text', '')
+            message_id = msg.get('message_id')
+            
+            if text:
+                process_message(chat_id, user_id, user_name, text, message_id)
+        
         return 'ok', 200
     except Exception as e:
-        logger.error(f"Webhook ошибка: {e}")
-        return 'error', 500
+        logger.error(f"Ошибка: {e}")
+        return 'ok', 200
 
 @app.route('/health')
 def health():

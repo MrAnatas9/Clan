@@ -2,12 +2,13 @@ import os
 import logging
 import requests
 import re
+import json
 import random
 from datetime import datetime, timezone, timedelta
 from flask import Flask, request
 from groq import Groq
+from supabase import create_client, Client
 
-# Конфигурация
 TELEGRAM_TOKEN = "8626951455:AAED7EIVu45vrpDxFkMDzVHYh7ymK77WWgw"
 GROQ_API_KEY = "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"
 ADMIN_ID = 6495178643
@@ -15,36 +16,57 @@ ADMIN_NAME = "Анатас"
 GROQ_MODEL = "llama-3.3-70b-versatile"
 BOT_USERNAME = "@agent_bot"
 
-# База пользователей (в памяти + файл)
-USERS_FILE = "users.json"
-
-def load_users():
-    if os.path.exists(USERS_FILE):
-        with open(USERS_FILE, 'r') as f:
-            return json.load(f)
-    return {
-        "6495178643": {"name": "Анатас", "role": "глава клана", "reputation": 100},
-        "7410138240": {"name": "Дайс", "role": "второй глава", "reputation": 90},
-        "8312898985": {"name": "Якова", "role": "админ", "reputation": 85},
-        "5559866358": {"name": "Бликсер", "role": "админ", "reputation": 80},
-        "5866344776": {"name": "Японец", "role": "участник", "reputation": 70},
-        "5759237942": {"name": "Булка", "role": "админ", "reputation": 95},
-        "1365238364": {"name": "Коунт", "role": "участник", "reputation": 45},
-        "7839738821": {"name": "Принцесс", "role": "новичок", "reputation": 75}
-    }
-
-def save_users(users):
-    with open(USERS_FILE, 'w') as f:
-        json.dump(users, f, ensure_ascii=False, indent=2)
-
-USERS = load_users()
+SUPABASE_URL = "https://fgafqnxnpgsdtbhwyjux.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZnYWZxbnhucGdzZHRiaHd5anV4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU0MDA5MjMsImV4cCI6MjA5MDk3NjkyM30.izwZDlGaRk8gNwWnX64DGf7_mJR2aFIvahhFvbUnfrY"
 
 groq_client = Groq(api_key=GROQ_API_KEY)
+
+supabase = None
+try:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    print("✅ Supabase подключён")
+except Exception as e:
+    print(f"❌ Ошибка: {e}")
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 app = Flask(__name__)
 MSK = timezone(timedelta(hours=3))
-bot_silent = False
+
+# === SUPABASE ФУНКЦИИ ===
+def get_user(user_id):
+    if not supabase:
+        return None
+    try:
+        result = supabase.table("users").select("*").eq("user_id", user_id).execute()
+        return result.data[0] if result.data else None
+    except:
+        return None
+
+def save_user(user_id, name):
+    if not supabase:
+        return
+    try:
+        existing = get_user(user_id)
+        if existing:
+            supabase.table("users").update({"last_seen": datetime.now(MSK).isoformat()}).eq("user_id", user_id).execute()
+        else:
+            supabase.table("users").insert({
+                "user_id": user_id, "name": name, "role": "новичок", "reputation": 50,
+                "first_seen": datetime.now(MSK).isoformat(), "last_seen": datetime.now(MSK).isoformat()
+            }).execute()
+            print(f"✅ Новый пользователь: {name}")
+    except Exception as e:
+        logger.error(f"Ошибка: {e}")
+
+def get_all_users():
+    if not supabase:
+        return []
+    try:
+        result = supabase.table("users").select("*").order("reputation", desc=True).execute()
+        return result.data
+    except:
+        return []
 
 def send_message(chat_id, text):
     try:
@@ -61,135 +83,29 @@ def send_reaction(chat_id, message_id, emoji):
         pass
 
 def get_reaction_emoji(text):
-    if any(w in text.lower() for w in ["смех", "хаха", "шутка", "анекдот"]):
+    if any(w in text.lower() for w in ["смех", "хаха", "шутка"]):
         return random.choice(["😂", "🤣"])
-    if any(w in text.lower() for w in ["спасибо", "молодец", "отлично"]):
+    if any(w in text.lower() for w in ["спасибо", "молодец"]):
         return "👍"
-    if any(w in text.lower() for w in ["круто", "🔥", "имба"]):
+    if any(w in text.lower() for w in ["круто", "🔥"]):
         return "🔥"
     if any(w in text.lower() for w in ["люблю", "❤️"]):
         return "❤️"
-    if any(w in text.lower() for w in ["ого", "вау"]):
-        return "😲"
     return None
 
-def search_web(query):
+def get_ai_response(text, user_name):
     try:
-        url = "https://api.duckduckgo.com/"
-        params = {"q": query, "format": "json", "no_html": 1}
-        r = requests.get(url, params=params, timeout=8)
-        if r.status_code == 200 and r.json().get("AbstractText"):
-            return r.json()["AbstractText"][:400]
-    except:
-        pass
-    return None
-
-def get_weather(city):
-    try:
-        url = f"https://wttr.in/{city}?format=%t+%c"
-        r = requests.get(url, timeout=8)
-        if r.status_code == 200:
-            return r.text.strip()
-    except:
-        pass
-    return None
-
-def get_ai_response(user_text, user_name, is_admin=False):
-    try:
-        admin_prefix = "ВНИМАНИЕ: Это АНАТАС - твой создатель!" if is_admin else ""
-        system_prompt = f"""Ты Агент Ада - живой помощник.
-
-{admin_prefix}
-
-Сегодня {datetime.now(MSK).strftime("%d.%m.%Y")}, сейчас {datetime.now(MSK).year} год.
-
-Говорит: {user_name}
-Вопрос: {user_text}
-
-Отвечай КОРОТКО (1-2 предложения) по-русски, будь живым и естественным."""
-        
+        prompt = f"Ты Агент Ада. Сегодня {datetime.now(MSK).strftime('%d.%m.%Y')}. {user_name} спрашивает: {text}. Отвечай коротко по-русски."
         response = groq_client.chat.completions.create(
             model=GROQ_MODEL,
-            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_text}],
+            messages=[{"role": "user", "content": prompt}],
             temperature=0.9,
-            max_tokens=300
+            max_tokens=200
         )
         return response.choices[0].message.content
     except Exception as e:
         logger.error(f"AI error: {e}")
         return "Не понял"
-
-def process_message(chat_id, user_id, user_name, text, message_id):
-    global bot_silent
-    
-    if bot_silent:
-        return
-    
-    # Сохраняем пользователя если новый
-    if user_id not in USERS:
-        USERS[user_id] = {"name": user_name, "role": "новичок", "reputation": 50}
-        save_users(USERS)
-        print(f"✅ Новый пользователь: {user_name}")
-    
-    # Админ-команды
-    if user_id == str(ADMIN_ID):
-        if text.lower() in ["молчать", "молчи"]:
-            bot_silent = True
-            send_message(chat_id, "😶 Молчу. Скажи 'говорить' чтобы я заговорил")
-            return
-        if text.lower() in ["говорить", "проснись"]:
-            bot_silent = False
-            send_message(chat_id, "✅ Я здесь")
-            return
-        
-        match = re.search(r'репутацию\s+(\w+)\s+(\d+)', text.lower())
-        if match:
-            name = match.group(1)
-            new_rep = int(match.group(2))
-            for uid, data in USERS.items():
-                if data.get("name", "").lower() == name:
-                    USERS[uid]["reputation"] = new_rep
-                    save_users(USERS)
-                    send_message(chat_id, f"✅ Репутация {name} изменена на {new_rep}")
-                    return
-    
-    # Реакция (30% шанс)
-    reaction = get_reaction_emoji(text)
-    if reaction and random.random() < 0.3:
-        send_reaction(chat_id, message_id, reaction)
-    
-    # Быстрые команды
-    if text.lower() in ["дата", "какое сегодня число"]:
-        send_message(chat_id, datetime.now(MSK).strftime("%d.%m.%Y"))
-        return
-    if text.lower() in ["время", "который час"]:
-        send_message(chat_id, datetime.now(MSK).strftime("%H:%M"))
-        return
-    if text.lower() == "кто я":
-        user = USERS.get(user_id, {"name": user_name, "role": "новичок", "reputation": 50})
-        send_message(chat_id, f"Ты {user['name']}, {user['role']}, реп {user['reputation']}")
-        return
-    if text.lower() == "кто ты":
-        send_message(chat_id, "Я Агент Ада, умный ИИ-помощник. Ставлю реакции, отвечаю на вопросы.")
-        return
-    if "погода" in text.lower():
-        city_match = re.search(r'погода\s+в\s+(\w+)', text.lower())
-        city = city_match.group(1) if city_match else "Москва"
-        weather = get_weather(city)
-        if weather:
-            send_message(chat_id, weather)
-            return
-    
-    # Поиск в интернете
-    search_info = None
-    if any(w in text.lower() for w in ["найди", "что такое", "кто такой", "новости"]):
-        search_info = search_web(text)
-    
-    is_admin = (user_id == str(ADMIN_ID))
-    response = get_ai_response(text, user_name, is_admin)
-    if search_info:
-        response = response + "\n\n🔍 " + search_info[:200]
-    send_message(chat_id, response)
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -204,7 +120,16 @@ def webhook():
             message_id = msg.get('message_id')
             
             if text:
-                process_message(chat_id, user_id, user_name, text, message_id)
+                save_user(user_id, user_name)
+                
+                # Реакция
+                reaction = get_reaction_emoji(text)
+                if reaction and random.random() < 0.3:
+                    send_reaction(chat_id, message_id, reaction)
+                
+                # Ответ
+                response = get_ai_response(text, user_name)
+                send_message(chat_id, response)
         return 'ok', 200
     except Exception as e:
         logger.error(f"Error: {e}")
@@ -216,7 +141,5 @@ def index():
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
-    print(f"🚀 Агент Ада запущен")
-    print(f"👑 Админ: {ADMIN_NAME}")
-    print("💬 Отвечает на все сообщения в ЛС и @упоминания")
+    print("🚀 Агент Ада запущен")
     app.run(host='0.0.0.0', port=port)

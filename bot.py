@@ -2,71 +2,24 @@ import os
 import logging
 import requests
 import re
-import json
 import random
 from datetime import datetime, timezone, timedelta
 from flask import Flask, request
 from groq import Groq
-from supabase import create_client, Client
 
 TELEGRAM_TOKEN = "8626951455:AAED7EIVu45vrpDxFkMDzVHYh7ymK77WWgw"
-GROQ_API_KEY = "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"
+GROQ_API_KEY = "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"
 ADMIN_ID = 6495178643
-ADMIN_NAME = "Анатас"
 GROQ_MODEL = "llama-3.3-70b-versatile"
-BOT_USERNAME = "@agent_bot"
-
-SUPABASE_URL = "https://fgafqnxnpgsdtbhwyjux.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZnYWZxbnhucGdzZHRiaHd5anV4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU0MDA5MjMsImV4cCI6MjA5MDk3NjkyM30.izwZDlGaRk8gNwWnX64DGf7_mJR2aFIvahhFvbUnfrY"
 
 groq_client = Groq(api_key=GROQ_API_KEY)
-
-supabase = None
-try:
-    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-    print("✅ Supabase подключён")
-except Exception as e:
-    print(f"❌ Ошибка: {e}")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 app = Flask(__name__)
 MSK = timezone(timedelta(hours=3))
 
-# === SUPABASE ФУНКЦИИ ===
-def get_user(user_id):
-    if not supabase:
-        return None
-    try:
-        result = supabase.table("users").select("*").eq("user_id", user_id).execute()
-        return result.data[0] if result.data else None
-    except:
-        return None
-
-def save_user(user_id, name):
-    if not supabase:
-        return
-    try:
-        existing = get_user(user_id)
-        if existing:
-            supabase.table("users").update({"last_seen": datetime.now(MSK).isoformat()}).eq("user_id", user_id).execute()
-        else:
-            supabase.table("users").insert({
-                "user_id": user_id, "name": name, "role": "новичок", "reputation": 50,
-                "first_seen": datetime.now(MSK).isoformat(), "last_seen": datetime.now(MSK).isoformat()
-            }).execute()
-            print(f"✅ Новый пользователь: {name}")
-    except Exception as e:
-        logger.error(f"Ошибка: {e}")
-
-def get_all_users():
-    if not supabase:
-        return []
-    try:
-        result = supabase.table("users").select("*").order("reputation", desc=True).execute()
-        return result.data
-    except:
-        return []
+USERS = {}
 
 def send_message(chat_id, text):
     try:
@@ -95,7 +48,12 @@ def get_reaction_emoji(text):
 
 def get_ai_response(text, user_name):
     try:
-        prompt = f"Ты Агент Ада. Сегодня {datetime.now(MSK).strftime('%d.%m.%Y')}. {user_name} спрашивает: {text}. Отвечай коротко по-русски."
+        prompt = f"""Ты Агент Ада - умный помощник. Сегодня {datetime.now(MSK).strftime('%d.%m.%Y')}.
+
+Пользователь {user_name} спрашивает: {text}
+
+Отвечай коротко (1-2 предложения) по-русски, будь дружелюбным."""
+        
         response = groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[{"role": "user", "content": prompt}],
@@ -120,14 +78,38 @@ def webhook():
             message_id = msg.get('message_id')
             
             if text:
-                save_user(user_id, user_name)
-                
                 # Реакция
                 reaction = get_reaction_emoji(text)
                 if reaction and random.random() < 0.3:
                     send_reaction(chat_id, message_id, reaction)
                 
-                # Ответ
+                # Команды
+                if text.lower() == "/start":
+                    send_message(chat_id, "🤖 Агент Ада здесь! Задавай вопросы.")
+                    return 'ok', 200
+                if text.lower() == "/help":
+                    send_message(chat_id, "/start - начать\n/help - помощь")
+                    return 'ok', 200
+                if text.lower() in ["дата", "какое сегодня число"]:
+                    send_message(chat_id, datetime.now(MSK).strftime("%d.%m.%Y"))
+                    return 'ok', 200
+                if text.lower() in ["время", "который час"]:
+                    send_message(chat_id, datetime.now(MSK).strftime("%H:%M"))
+                    return 'ok', 200
+                if text.lower() == "кто я":
+                    send_message(chat_id, f"Ты {user_name}")
+                    return 'ok', 200
+                
+                # Админ-команды
+                if user_id == str(ADMIN_ID):
+                    if text.lower() in ["молчать", "молчи"]:
+                        send_message(chat_id, "😶 Молчу")
+                        return 'ok', 200
+                    if text.lower() in ["говорить", "проснись"]:
+                        send_message(chat_id, "✅ Я здесь")
+                        return 'ok', 200
+                
+                # Обычный ответ
                 response = get_ai_response(text, user_name)
                 send_message(chat_id, response)
         return 'ok', 200

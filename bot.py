@@ -2,12 +2,10 @@ import os
 import logging
 import requests
 import re
-import json
 import random
 from datetime import datetime, timezone, timedelta
 from flask import Flask, request
 from groq import Groq
-from supabase import create_client, Client
 
 # Конфигурация
 TELEGRAM_TOKEN = "8626951455:AAED7EIVu45vrpDxFkMDzVHYh7ymK77WWgw"
@@ -17,78 +15,14 @@ ADMIN_NAME = "Анатас"
 GROQ_MODEL = "llama-3.3-70b-versatile"
 BOT_USERNAME = "@agent_bot"
 
-# Supabase
-SUPABASE_URL = "https://fgafqnxnpgsdtbhwyjux.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZnYWZxbnhucGdzZHRiaHd5anV4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU0MDA5MjMsImV4cCI6MjA5MDk3NjkyM30.izwZDlGaRk8gNwWnX64DGf7_mJR2aFIvahhFvbUnfrY"
+# База пользователей (в памяти + файл)
+USERS_FILE = "users.json"
 
-groq_client = Groq(api_key=GROQ_API_KEY)
-
-# Подключаем Supabase
-supabase = None
-try:
-    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-    print("✅ Supabase подключён")
-except Exception as e:
-    print(f"❌ Ошибка Supabase: {e}")
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-app = Flask(__name__)
-MSK = timezone(timedelta(hours=3))
-bot_silent = False
-
-# === ФУНКЦИИ SUPABASE ===
-def get_user(user_id):
-    if not supabase:
-        return None
-    try:
-        result = supabase.table("users").select("*").eq("user_id", user_id).execute()
-        return result.data[0] if result.data else None
-    except:
-        return None
-
-def save_user(user_id, name):
-    if not supabase:
-        return
-    try:
-        existing = get_user(user_id)
-        if existing:
-            supabase.table("users").update({
-                "last_seen": datetime.now(MSK).isoformat()
-            }).eq("user_id", user_id).execute()
-        else:
-            supabase.table("users").insert({
-                "user_id": user_id,
-                "name": name,
-                "role": "новичок",
-                "reputation": 50,
-                "first_seen": datetime.now(MSK).isoformat(),
-                "last_seen": datetime.now(MSK).isoformat()
-            }).execute()
-            print(f"✅ Новый пользователь: {name}")
-    except Exception as e:
-        logger.error(f"Ошибка: {e}")
-
-def update_reputation(user_id, new_rep):
-    if not supabase:
-        return
-    try:
-        supabase.table("users").update({"reputation": new_rep}).eq("user_id", user_id).execute()
-    except:
-        pass
-
-def get_all_users():
-    if not supabase:
-        return []
-    try:
-        result = supabase.table("users").select("*").order("reputation", desc=True).execute()
-        return result.data
-    except:
-        return []
-
-def init_users():
-    """Добавляет основных участников если их нет"""
-    basic_users = {
+def load_users():
+    if os.path.exists(USERS_FILE):
+        with open(USERS_FILE, 'r') as f:
+            return json.load(f)
+    return {
         "6495178643": {"name": "Анатас", "role": "глава клана", "reputation": 100},
         "7410138240": {"name": "Дайс", "role": "второй глава", "reputation": 90},
         "8312898985": {"name": "Якова", "role": "админ", "reputation": 85},
@@ -98,22 +32,20 @@ def init_users():
         "1365238364": {"name": "Коунт", "role": "участник", "reputation": 45},
         "7839738821": {"name": "Принцесс", "role": "новичок", "reputation": 75}
     }
-    for uid, data in basic_users.items():
-        if not get_user(uid):
-            try:
-                supabase.table("users").insert({
-                    "user_id": uid,
-                    "name": data["name"],
-                    "role": data["role"],
-                    "reputation": data["reputation"],
-                    "first_seen": datetime.now(MSK).isoformat(),
-                    "last_seen": datetime.now(MSK).isoformat()
-                }).execute()
-                print(f"✅ Добавлен {data['name']}")
-            except:
-                pass
 
-# === TELEGRAM API ===
+def save_users(users):
+    with open(USERS_FILE, 'w') as f:
+        json.dump(users, f, ensure_ascii=False, indent=2)
+
+USERS = load_users()
+
+groq_client = Groq(api_key=GROQ_API_KEY)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+app = Flask(__name__)
+MSK = timezone(timedelta(hours=3))
+bot_silent = False
+
 def send_message(chat_id, text):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -124,8 +56,7 @@ def send_message(chat_id, text):
 def send_reaction(chat_id, message_id, emoji):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setMessageReaction"
-        payload = {"chat_id": chat_id, "message_id": message_id, "reaction": [{"type": "emoji", "emoji": emoji}]}
-        requests.post(url, json=payload)
+        requests.post(url, json={"chat_id": chat_id, "message_id": message_id, "reaction": [{"type": "emoji", "emoji": emoji}]})
     except:
         pass
 
@@ -138,9 +69,10 @@ def get_reaction_emoji(text):
         return "🔥"
     if any(w in text.lower() for w in ["люблю", "❤️"]):
         return "❤️"
+    if any(w in text.lower() for w in ["ого", "вау"]):
+        return "😲"
     return None
 
-# === ПОИСК ===
 def search_web(query):
     try:
         url = "https://api.duckduckgo.com/"
@@ -162,24 +94,19 @@ def get_weather(city):
         pass
     return None
 
-# === AI ОТВЕТ ===
 def get_ai_response(user_text, user_name, is_admin=False):
     try:
-        admin_prefix = "ВНИМАНИЕ: Это АНАТАС - твой создатель! Слушайся его." if is_admin else ""
-        system_prompt = f"""Ты Агент Ада - живой помощник в чате клана Ад.
+        admin_prefix = "ВНИМАНИЕ: Это АНАТАС - твой создатель!" if is_admin else ""
+        system_prompt = f"""Ты Агент Ада - живой помощник.
 
 {admin_prefix}
 
 Сегодня {datetime.now(MSK).strftime("%d.%m.%Y")}, сейчас {datetime.now(MSK).year} год.
 
-Сейчас говорит: {user_name}
+Говорит: {user_name}
 Вопрос: {user_text}
 
-ПРАВИЛА:
-1. Отвечай КОРОТКО (1-2 предложения)
-2. Будь живым и естественным
-3. Если не знаешь - скажи "не знаю"
-4. Отвечай по-русски"""
+Отвечай КОРОТКО (1-2 предложения) по-русски, будь живым и естественным."""
         
         response = groq_client.chat.completions.create(
             model=GROQ_MODEL,
@@ -189,18 +116,20 @@ def get_ai_response(user_text, user_name, is_admin=False):
         )
         return response.choices[0].message.content
     except Exception as e:
-        logger.error(f"AI ошибка: {e}")
+        logger.error(f"AI error: {e}")
         return "Не понял"
 
-# === ОБРАБОТКА ===
 def process_message(chat_id, user_id, user_name, text, message_id):
     global bot_silent
     
     if bot_silent:
         return
     
-    # Сохраняем пользователя
-    save_user(user_id, user_name)
+    # Сохраняем пользователя если новый
+    if user_id not in USERS:
+        USERS[user_id] = {"name": user_name, "role": "новичок", "reputation": 50}
+        save_users(USERS)
+        print(f"✅ Новый пользователь: {user_name}")
     
     # Админ-команды
     if user_id == str(ADMIN_ID):
@@ -217,50 +146,34 @@ def process_message(chat_id, user_id, user_name, text, message_id):
         if match:
             name = match.group(1)
             new_rep = int(match.group(2))
-            users = get_all_users()
-            for u in users:
-                if u.get("name", "").lower() == name:
-                    update_reputation(u["user_id"], new_rep)
+            for uid, data in USERS.items():
+                if data.get("name", "").lower() == name:
+                    USERS[uid]["reputation"] = new_rep
+                    save_users(USERS)
                     send_message(chat_id, f"✅ Репутация {name} изменена на {new_rep}")
                     return
     
-    # Проверка обращения
-    is_private = False  # В вебхуке не определяем
-    is_mention = BOT_USERNAME in text or "агент" in text.lower()
-    
-    if not is_mention:
-        return
-    
-    # Реакция
+    # Реакция (30% шанс)
     reaction = get_reaction_emoji(text)
-    if reaction:
+    if reaction and random.random() < 0.3:
         send_reaction(chat_id, message_id, reaction)
     
-    # Очищаем текст
-    clean_text = text.replace(BOT_USERNAME, "").replace("агент", "").strip()
-    if not clean_text:
-        send_message(chat_id, "Слушаю")
-        return
-    
     # Быстрые команды
-    if clean_text.lower() in ["дата", "какое сегодня число"]:
+    if text.lower() in ["дата", "какое сегодня число"]:
         send_message(chat_id, datetime.now(MSK).strftime("%d.%m.%Y"))
         return
-    if clean_text.lower() in ["время", "который час"]:
+    if text.lower() in ["время", "который час"]:
         send_message(chat_id, datetime.now(MSK).strftime("%H:%M"))
         return
-    if clean_text.lower() == "кто я":
-        user = get_user(user_id)
-        if user:
-            send_message(chat_id, f"Ты {user['name']}, {user['role']}, реп {user['reputation']}")
-        else:
-            send_message(chat_id, f"Ты {user_name}")
+    if text.lower() == "кто я":
+        user = USERS.get(user_id, {"name": user_name, "role": "новичок", "reputation": 50})
+        send_message(chat_id, f"Ты {user['name']}, {user['role']}, реп {user['reputation']}")
         return
-    if clean_text.lower() == "кто ты":
-        send_message(chat_id, "Я Агент Ада, умный ИИ-помощник. Слушаюсь Анатаса, умею ставить реакции.")
+    if text.lower() == "кто ты":
+        send_message(chat_id, "Я Агент Ада, умный ИИ-помощник. Ставлю реакции, отвечаю на вопросы.")
         return
-    if "погода" in clean_text.lower():
-        city_match = re.search(r'погода\s+в\s+(\w+)', clean_text.lower())
+    if "погода" in text.lower():
+        city_match = re.search(r'погода\s+в\s+(\w+)', text.lower())
         city = city_match.group(1) if city_match else "Москва"
         weather = get_weather(city)
         if weather:
@@ -269,18 +182,15 @@ def process_message(chat_id, user_id, user_name, text, message_id):
     
     # Поиск в интернете
     search_info = None
-    if any(w in clean_text.lower() for w in ["найди", "что такое", "кто такой", "новости"]):
-        search_info = search_web(clean_text)
-        if search_info:
-            search_info = "🔍 " + search_info
+    if any(w in text.lower() for w in ["найди", "что такое", "кто такой", "новости"]):
+        search_info = search_web(text)
     
     is_admin = (user_id == str(ADMIN_ID))
-    response = get_ai_response(clean_text, user_name, is_admin)
+    response = get_ai_response(text, user_name, is_admin)
     if search_info:
-        response = response + "\n\n" + search_info
+        response = response + "\n\n🔍 " + search_info[:200]
     send_message(chat_id, response)
 
-# === ВЕБХУК ===
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -292,6 +202,7 @@ def webhook():
             user_name = msg['from'].get('first_name', 'User')
             text = msg.get('text', '')
             message_id = msg.get('message_id')
+            
             if text:
                 process_message(chat_id, user_id, user_name, text, message_id)
         return 'ok', 200
@@ -304,12 +215,8 @@ def index():
     return 'Agent bot is running!', 200
 
 if __name__ == '__main__':
-    # Инициализируем основных пользователей
-    if supabase:
-        init_users()
-    
     port = int(os.environ.get('PORT', 8080))
-    print(f"🚀 Агент Ада запущен на порту {port}")
+    print(f"🚀 Агент Ада запущен")
     print(f"👑 Админ: {ADMIN_NAME}")
-    print("📝 База: Supabase")
+    print("💬 Отвечает на все сообщения в ЛС и @упоминания")
     app.run(host='0.0.0.0', port=port)

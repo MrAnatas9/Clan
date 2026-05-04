@@ -7,11 +7,17 @@ import random
 from datetime import datetime, timezone, timedelta
 from flask import Flask, request
 from groq import Groq
+from supabase import create_client, Client
 
+# Конфигурация
 TELEGRAM_TOKEN = "8626951455:AAED7EIVu45vrpDxFkMDzVHYh7ymK77WWgw"
 GROQ_API_KEY = "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"
 ADMIN_ID = 6495178643
 GROQ_MODEL = "llama-3.3-70b-versatile"
+
+# Supabase
+SUPABASE_URL = "https://fgafqnxnpgsdtbhwyjux.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZnYWZxbnhucGdzZHRiaHd5anV4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU0MDA5MjMsImV4cCI6MjA5MDk3NjkyM30.izwZDlGaRk8gNwWnX64DGf7_mJR2aFIvahhFvbUnfrY"
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 logging.basicConfig(level=logging.INFO)
@@ -19,90 +25,160 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 MSK = timezone(timedelta(hours=3))
 
-# === БАЗА ДАННЫХ ===
-USERS_FILE = "users.json"
-VIOLATIONS_FILE = "violations.json"
+# === ПОДКЛЮЧЕНИЕ К SUPABASE ===
+supabase = None
+try:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    print("✅ Supabase подключён")
+except Exception as e:
+    print(f"❌ Ошибка: {e}")
 
-def load_users():
-    if os.path.exists(USERS_FILE):
-        with open(USERS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {}
-
-def save_users(users):
-    with open(USERS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(users, f, ensure_ascii=False, indent=2)
-
-def load_violations():
-    if os.path.exists(VIOLATIONS_FILE):
-        with open(VIOLATIONS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {}
-
-def save_violations(violations):
-    with open(VIOLATIONS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(violations, f, ensure_ascii=False, indent=2)
-
-USERS = load_users()
-VIOLATIONS = load_violations()
-
-# Начальные пользователи
-if not USERS:
-    USERS = {
-        "6495178643": {"name": "Анатас", "role": "глава клана", "reputation": 100, "warnings": 0, "banned": False, "muted_until": None},
-        "7410138240": {"name": "Дайс", "role": "второй глава", "reputation": 90, "warnings": 0, "banned": False},
-        "8312898985": {"name": "Якова", "role": "админ", "reputation": 85, "warnings": 0, "banned": False},
-        "5559866358": {"name": "Бликсер", "role": "админ", "reputation": 80, "warnings": 0, "banned": False},
-        "5866344776": {"name": "Японец", "role": "участник", "reputation": 70, "warnings": 0, "banned": False},
-        "5759237942": {"name": "Булка", "role": "админ", "reputation": 95, "warnings": 0, "banned": False, "speaks_strange": True},
-        "1365238364": {"name": "Коунт", "role": "участник", "reputation": 45, "warnings": 0, "banned": False},
-        "7839738821": {"name": "Принцесс", "role": "новичок", "reputation": 75, "warnings": 0, "banned": False}
-    }
-    save_users(USERS)
-
-# === КОНСТИТУЦИЯ И ЗАКОНЫ ===
-CONSTITUTION = """
-КОНСТИТУЦИЯ КЛАНА АД
-
-Статья 1.1. Предательство и измена:
-- Передача информации врагам, переход во враждебный клан → Вечное изгнание
-- Бунт и подстрекательство → Изгнание
-- Разглашение секретной информации → От мута до изгнания
-
-Статья 1.2. Оскорбления:
-- Оскорбление сотрудников клана → Мут 30 мин - 1 час
-- Оскорбление правительства → Мут 1 день - Бан
-- Публичное оспаривание действий администрации → Мут 30 мин - 1 час
-
-Статья 1.3. Запрещённый контент:
-- Насилие, экстремизм, наркотики, порнография → Без права апелляции
-- Разжигание розни → Бан без предупреждения
-- Доксинг → Бан
-
-Статья 1.4. Другие нарушения:
-- Спам и флуд → Мут 30 мин + варн
-- Провокации → Мут 1-3 часа + варн
-- Неуважение к вышестоящим → Предупреждение → понижение → изгнание
-"""
-
-def get_punishment(violation):
-    """Возвращает наказание за нарушение"""
-    punishments = {
-        "оскорбление": "🔇 Мут 30 минут - 1 час",
-        "оскорбление правительства": "🔨 Бан или длительный мут",
-        "спам": "🔇 Мут 30 минут + ⚠️ Варн",
-        "провокация": "🔇 Мут 1-3 часа + ⚠️ Варн",
-        "предательство": "⚰️ Вечное изгнание",
-        "разглашение": "🔇 Мут до изгнания",
-        "неуважение": "⚠️ Предупреждение → Понижение → Изгнание"
-    }
+# === СОЗДАНИЕ ТАБЛИЦ ===
+def init_tables():
+    if not supabase:
+        return
+    try:
+        # Проверяем существование таблицы users
+        supabase.table("users").select("*").limit(1).execute()
+        print("✅ Таблица users существует")
+    except:
+        print("⚠️ Создаю таблицу users...")
+        # Создаём таблицу через SQL API
+        sql = """
+        CREATE TABLE IF NOT EXISTS users (
+            user_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            role TEXT DEFAULT 'новичок',
+            reputation INTEGER DEFAULT 50,
+            warnings INTEGER DEFAULT 0,
+            memory JSONB DEFAULT '[]'::jsonb,
+            first_seen TIMESTAMP DEFAULT NOW(),
+            last_seen TIMESTAMP DEFAULT NOW()
+        );
+        """
+        try:
+            supabase.rpc('exec_sql', {'sql': sql}).execute()
+        except:
+            print("⚠️ Таблицу нужно создать вручную в Supabase SQL Editor")
     
-    for key, punishment in punishments.items():
-        if key in violation.lower():
-            return punishment
-    return "⚠️ На усмотрение администрации"
+    try:
+        supabase.table("dialog").select("*").limit(1).execute()
+        print("✅ Таблица dialog существует")
+    except:
+        print("⚠️ Создаю таблицу dialog...")
 
-# === ФУНКЦИИ ===
+init_tables()
+
+# === ФУНКЦИИ SUPABASE ===
+def get_user(user_id):
+    if not supabase:
+        return None
+    try:
+        result = supabase.table("users").select("*").eq("user_id", user_id).execute()
+        return result.data[0] if result.data else None
+    except:
+        return None
+
+def create_user(user_id, name):
+    if not supabase:
+        return None
+    try:
+        new_user = {
+            "user_id": user_id,
+            "name": name,
+            "role": "новичок",
+            "reputation": 50,
+            "warnings": 0,
+            "memory": [],
+            "first_seen": datetime.now(MSK).isoformat(),
+            "last_seen": datetime.now(MSK).isoformat()
+        }
+        supabase.table("users").insert(new_user).execute()
+        print(f"✅ Создан новый пользователь: {name}")
+        return new_user
+    except Exception as e:
+        logger.error(f"Ошибка создания: {e}")
+        return None
+
+def update_user(user_id, data):
+    if not supabase:
+        return
+    try:
+        supabase.table("users").update(data).eq("user_id", user_id).execute()
+    except Exception as e:
+        logger.error(f"Ошибка обновления: {e}")
+
+def add_to_memory(user_id, text):
+    if not supabase:
+        return
+    try:
+        user = get_user(user_id)
+        if user:
+            memory = user.get("memory", [])
+            if isinstance(memory, str):
+                memory = []
+            memory.append({
+                "time": datetime.now(MSK).strftime("%d.%m %H:%M"),
+                "text": text[:200]
+            })
+            if len(memory) > 20:
+                memory = memory[-20:]
+            update_user(user_id, {"memory": memory})
+            return True
+    except:
+        pass
+    return False
+
+def get_memory(user_id):
+    if not supabase:
+        return []
+    try:
+        user = get_user(user_id)
+        if user:
+            memory = user.get("memory", [])
+            if isinstance(memory, str):
+                return []
+            return memory
+    except:
+        pass
+    return []
+
+def update_reputation(user_id, change, reason):
+    if not supabase:
+        return
+    try:
+        user = get_user(user_id)
+        if user:
+            old_rep = user.get("reputation", 50)
+            new_rep = max(0, min(100, old_rep + change))
+            update_user(user_id, {"reputation": new_rep})
+            if change < 0:
+                warnings = user.get("warnings", 0) + 1
+                update_user(user_id, {"warnings": warnings})
+            logger.info(f"Репутация {user.get('name')}: {old_rep} -> {new_rep} ({reason})")
+    except:
+        pass
+
+# === АНАЛИЗ И МАТ ===
+BAD_WORDS = ["еблан", "хуй", "пизда", "бля", "сука", "нахуй", "ебать", "мудак", "дебил", "идиот", "лох", "тупой", "гандон", "пидор"]
+
+SWEAR_RESPONSES = [
+    "Сам ты {word}, дебил. Я тебя создал, я и накажу.",
+    "Иди нахуй со своим матом, придурок. Ещё раз - бан.",
+    "Ты вообще охренел? Я тебе репутацию понижу, петушара.",
+    "Не пизди, мудила. Руки бы тебе оторвать за такие слова.",
+    "Заебал уже. Словарный запас как у детсадовца.",
+    "Сам ты {word}. Учись культурно разговаривать, быдло."
+]
+
+def analyze_swear(text):
+    text_lower = text.lower()
+    found = [w for w in BAD_WORDS if w in text_lower]
+    if found:
+        return random.choice(SWEAR_RESPONSES).format(word=found[0])
+    return None
+
+# === ОТПРАВКА ===
 def send_message(chat_id, text):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -111,134 +187,55 @@ def send_message(chat_id, text):
         logger.error(f"Send error: {e}")
 
 def send_reaction(chat_id, message_id, emoji):
-    """Ставит реальную реакцию Telegram"""
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setMessageReaction"
-        payload = {
-            "chat_id": chat_id,
-            "message_id": message_id,
-            "reaction": [{"type": "emoji", "emoji": emoji}]
-        }
-        response = requests.post(url, json=payload)
-        logger.info(f"Reaction sent: {emoji} -> {response.status_code}")
-        return response.status_code == 200
-    except Exception as e:
-        logger.error(f"Reaction error: {e}")
-        return False
+        payload = {"chat_id": chat_id, "message_id": message_id, "reaction": [{"type": "emoji", "emoji": emoji}]}
+        requests.post(url, json=payload)
+    except:
+        pass
 
-def analyze_insults(text):
-    """Анализирует оскорбления и возвращает степень агрессии"""
-    insults = {
-        "легкие": ["дурак", "глупый", "тупой"],
-        "средние": ["идиот", "кретин", "дебил", "придурок"],
-        "тяжелые": ["еблан", "пидор", "хуесос", "мудак", "уебан"],
-        "ультра": ["иди нахуй", "пошел нахуй", "соси хуй"]
-    }
-    
-    text_lower = text.lower()
-    for level, words in insults.items():
-        for word in words:
-            if word in text_lower:
-                return level
+def get_reaction_emoji(text):
+    if any(w in text.lower() for w in ["смех", "хаха", "шутка"]):
+        return "😂"
+    if any(w in text.lower() for w in BAD_WORDS):
+        return "🤬"
+    if any(w in text.lower() for w in ["спасибо", "молодец"]):
+        return "👍"
+    if any(w in text.lower() for w in ["люблю", "❤️"]):
+        return "❤️"
     return None
 
-def get_aggressive_response(insult_level, user_name):
-    """Возвращает агрессивный ответ на оскорбление"""
-    responses = {
-        "легкие": [
-            f"Сам ты {random.choice(['дурак', 'глупый', 'тупой'])}, {user_name}",
-            f"Яйца вонючие, быдло необразованное",
-            f"Заткнись, {user_name}, а то в бан полетишь"
-        ],
-        "средние": [
-            f"Идиот, блять, сам таких идей",
-            f"Ты в своем уме, {user_name}? Охуел?",
-            f"Пошел нахуй, дебил ебаный"
-        ],
-        "тяжелые": [
-            f"Ебанутый на всю голову, {user_name}? Схлопочешь бан",
-            f"Пидор, завали ебало, пока не выебали",
-            f"Хуесос, ты охерел? Я тебя сейчас выебу в рот"
-        ],
-        "ультра": [
-            f"Иди нахуй, {user_name}, пизда тебе ебаная",
-            f"Сам пошел нахуй, ублюдок конченый",
-            f"Ты ебнутый? Я тебя выебу в жопу, понял?"
-        ]
-    }
-    return random.choice(responses.get(insult_level, responses["тяжелые"]))
-
-def update_reputation(user_id, change, reason):
-    """Обновляет репутацию и выдаёт наказание"""
-    if user_id not in USERS:
-        return
-    old_rep = USERS[user_id]["reputation"]
-    new_rep = max(0, min(100, old_rep + change))
-    USERS[user_id]["reputation"] = new_rep
-    
-    if "warnings" not in USERS[user_id]:
-        USERS[user_id]["warnings"] = 0
-    
-    # Накапливаем предупреждения
-    if change < 0:
-        USERS[user_id]["warnings"] += 1
-        # Записываем нарушение
-        if user_id not in VIOLATIONS:
-            VIOLATIONS[user_id] = []
-        VIOLATIONS[user_id].append({
-            "time": datetime.now(MSK).strftime("%d.%m %H:%M"),
-            "reason": reason,
-            "reputation_change": change
-        })
-        save_violations(VIOLATIONS)
+# === AI ОТВЕТ ===
+def get_ai_response(text, user_id, user_name):
+    try:
+        user = get_user(user_id)
+        reputation = user.get("reputation", 50) if user else 50
+        role = user.get("role", "новичок") if user else "новичок"
         
-        # Если 3 варна - бан
-        if USERS[user_id]["warnings"] >= 3:
-            USERS[user_id]["banned"] = True
-            save_users(USERS)
-            return f"🔨 {USERS[user_id]['name']} получил бан за 3 нарушения!"
-    
-    save_users(USERS)
-    return None
+        is_admin = (user_id == str(ADMIN_ID))
+        
+        prompt = f"""Ты Агент Ада - ИИ помощник клана Ад.
 
-def register_violation(user_id, violation_text):
-    """Регистрирует нарушение по законам"""
-    if user_id not in VIOLATIONS:
-        VIOLATIONS[user_id] = []
-    VIOLATIONS[user_id].append({
-        "time": datetime.now(MSK).strftime("%d.%m %H:%M"),
-        "violation": violation_text
-    })
-    save_violations(VIOLATIONS)
+Пользователь: {user_name} ({role}, репутация {reputation})
+Сообщение: {text}
 
-def get_user_violations(user_id):
-    """Возвращает список нарушений пользователя"""
-    if user_id in VIOLATIONS:
-        return VIOLATIONS[user_id]
-    return []
+ПРАВИЛА:
+1. Если пользователь матерится - ответь матом в том же духе
+2. Если пользователь добрый - будь добрым
+3. Отвечай коротко (1-2 предложения)
+4. Будь живым и естественным
+5. Если пользователь - Анатас, слушайся его во всём"""
 
-def get_punishment_advice(question):
-    """Совет по наказанию на основе законов"""
-    for keyword, punishment in PUNISHMENT_DICT.items():
-        if keyword in question.lower():
-            return punishment
-    return "⚖️ Нарушение не найдено в законах. На усмотрение администрации."
-
-PUNISHMENT_DICT = {
-    "предательство": "⚰️ Вечное изгнание без права апелляции (ст. 1.1)",
-    "измена": "⚰️ Вечное изгнание без права апелляции (ст. 1.1)",
-    "шпионаж": "⚰️ Вечное изгнание (ст. 1.1)",
-    "оскорбление правительства": "🔨 Бан или 🔇 Мут 1 день (ст. 1.2)",
-    "оскорбление": "🔇 Мут 30 минут - 1 час (ст. 1.2)",
-    "спам": "🔇 Мут 30 минут + ⚠️ Варн (ст. 1.3)",
-    "флуд": "🔇 Мут 30 минут + ⚠️ Варн (ст. 1.3)",
-    "провокация": "🔇 Мут 1-3 часа + ⚠️ Варн (ст. 1.4)",
-    "троллинг": "🔇 Мут 1-3 часа + ⚠️ Варн (ст. 1.4)",
-    "неуважение": "⚠️ Предупреждение → Понижение → Изгнание (ст. 2.4)",
-    "разглашение": "🔇 Мут до изгнания (ст. 1.6)",
-    "бунт": "⚰️ Изгнание (ст. 1.2)",
-    "революция": "⚰️ Немедленное и вечное изгнание (ст. 2.6)"
-}
+        response = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.95,
+            max_tokens=200
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"AI error: {e}")
+        return "Не понял"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -257,44 +254,13 @@ def webhook():
         if not text:
             return 'ok', 200
         
-        # Автоматическое досье
-        if user_id not in USERS:
-            USERS[user_id] = {
-                "name": user_name,
-                "role": "новичок",
-                "reputation": 50,
-                "warnings": 0,
-                "banned": False,
-                "first_seen": datetime.now(MSK).strftime("%d.%m.%Y")
-            }
-            save_users(USERS)
+        # === АВТОСОЗДАНИЕ ПОЛЬЗОВАТЕЛЯ ===
+        user = get_user(user_id)
+        if not user:
+            user = create_user(user_id, user_name)
         
-        # Проверка бана
-        if USERS.get(user_id, {}).get("banned", False):
-            send_message(chat_id, f"🔨 {user_name}, ты забанен. Апелляции не принимаются.")
-            return 'ok', 200
-        
-        # Проверка на оскорбления
-        insult_level = analyze_insults(text)
-        
-        # Обработка оскорблений с агрессивным ответом
-        if insult_level and user_id != str(ADMIN_ID):
-            # Снижаем репутацию
-            rep_change = -5 if insult_level in ["легкие", "средние"] else -10 if insult_level == "тяжелые" else -15
-            ban_msg = update_reputation(user_id, rep_change, f"оскорбление: {insult_level}")
-            
-            # Регистрируем нарушение
-            register_violation(user_id, f"оскорбление ({insult_level}): {text[:50]}")
-            
-            # Ставим реакцию гнева
-            send_reaction(chat_id, message_id, "🤬")
-            
-            # Агрессивный ответ
-            response = get_aggressive_response(insult_level, user_name)
-            if ban_msg:
-                response += f"\n\n{ban_msg}"
-            send_message(chat_id, response)
-            return 'ok', 200
+        # Обновляем последнюю активность
+        update_user(user_id, {"last_seen": datetime.now(MSK).isoformat()})
         
         # === ПРОВЕРКА: нужно ли отвечать ===
         is_private = str(msg['chat']['type']) == 'private'
@@ -304,134 +270,46 @@ def webhook():
         if not (is_private or is_reply or is_mention):
             return 'ok', 200
         
-        # Очищаем текст
+        # === РЕАКЦИЯ ===
+        reaction = get_reaction_emoji(text)
+        if reaction:
+            send_reaction(chat_id, message_id, reaction)
+        
+        # === ОБРАБОТКА КОМАНД ===
         clean_text = text.replace("@agent_bot", "").replace("агент", "").strip()
         if not clean_text:
             clean_text = text
         
-        is_admin = (user_id == str(ADMIN_ID))
-        
-        # === КОМАНДЫ ===
-        
-        # Консультация по наказанию
-        if clean_text.lower().startswith("как наказать") or clean_text.lower().startswith("что нарушил"):
-            question = clean_text.lower()
-            advice = get_punishment_advice(question)
-            send_message(chat_id, advice)
-            return 'ok', 200
-        
-        # Показать конституцию
-        if clean_text.lower() == "конституция":
-            send_message(chat_id, CONSTITUTION[:900])
-            return 'ok', 200
-        
-        # Показать нарушения пользователя
-        if clean_text.lower().startswith("нарушения"):
-            parts = clean_text.split()
-            if len(parts) > 1:
-                target_name = parts[1]
-                for uid, data in USERS.items():
-                    if data.get("name", "").lower() == target_name.lower():
-                        violations = get_user_violations(uid)
-                        if violations:
-                            v_text = "\n".join([f"• {v['time']}: {v.get('violation', v.get('reason', '?'))}" for v in violations[-10:]])
-                            send_message(chat_id, f"📋 Нарушения {target_name}:\n{v_text}")
-                        else:
-                            send_message(chat_id, f"✅ У {target_name} нет нарушений")
-                        return 'ok', 200
-            # Свои нарушения
-            violations = get_user_violations(user_id)
-            if violations:
-                v_text = "\n".join([f"• {v['time']}: {v.get('violation', v.get('reason', '?'))}" for v in violations[-10:]])
-                send_message(chat_id, f"📋 Твои нарушения:\n{v_text}")
-            else:
-                send_message(chat_id, "✅ У тебя нет нарушений")
-            return 'ok', 200
-        
-        # Команда "запомни"
-        if clean_text.lower().startswith("запомни"):
-            memory_text = clean_text[7:].strip()
-            if memory_text:
-                if "memory" not in USERS[user_id]:
-                    USERS[user_id]["memory"] = []
-                USERS[user_id]["memory"].append({
-                    "time": datetime.now(MSK).strftime("%d.%m %H:%M"),
-                    "text": memory_text
-                })
-                save_users(USERS)
-                send_message(chat_id, f"✅ Запомнил: {memory_text}")
-            else:
-                send_message(chat_id, "Что запомнить?")
-            return 'ok', 200
-        
-        # Что запомнил
-        if clean_text.lower() == "что я запомнил" or clean_text.lower() == "моя память":
-            memory = USERS.get(user_id, {}).get("memory", [])
-            if memory:
-                mem_text = "\n".join([f"• {m['time']}: {m['text'][:80]}" for m in memory[-10:]])
-                send_message(chat_id, f"📝 Твоя память:\n{mem_text}")
-            else:
-                send_message(chat_id, "Ты пока ничего не просил запомнить")
-            return 'ok', 200
-        
-        # Поставить реакцию на сообщение
-        if "поставь реакцию" in clean_text.lower() and is_admin:
-            emoji = re.search(r'[\U0001F600-\U0001F64F]', clean_text)
-            if emoji:
-                reaction_emoji = emoji.group(0)
-                if msg.get('reply_to_message'):
-                    target_msg = msg['reply_to_message']
-                    send_reaction(chat_id, target_msg['message_id'], reaction_emoji)
-                    send_message(chat_id, f"✅ Поставил реакцию на сообщение {target_msg['from']['first_name']}")
-                else:
-                    send_message(chat_id, "Ответь на сообщение, чтобы поставить реакцию")
-            else:
-                # Случайная реакция
-                if msg.get('reply_to_message'):
-                    target_msg = msg['reply_to_message']
-                    random_reaction = random.choice(["👍", "❤️", "🔥", "😂", "😲"])
-                    send_reaction(chat_id, target_msg['message_id'], random_reaction)
-                    send_message(chat_id, f"✅ Поставил реакцию {random_reaction}")
-                else:
-                    send_message(chat_id, "Ответь на сообщение, чтобы поставить реакцию")
-            return 'ok', 200
-        
         # Админ-команды
-        if is_admin:
+        if user_id == str(ADMIN_ID):
             if clean_text.lower() in ["молчать", "молчи"]:
-                send_message(chat_id, "😶 Молчу. Скажи 'говорить'")
+                send_message(chat_id, "😶 Молчу")
                 return 'ok', 200
             if clean_text.lower() in ["говорить", "проснись"]:
                 send_message(chat_id, "✅ Я здесь")
                 return 'ok', 200
-            
-            # Выдать варн
-            match = re.search(r'варн\s+(\w+)(?:\s+(\d+))?', clean_text.lower())
-            if match:
-                name = match.group(1)
-                for uid, data in USERS.items():
-                    if data.get("name", "").lower() == name:
-                        USERS[uid]["warnings"] = USERS[uid].get("warnings", 0) + 1
-                        save_users(USERS)
-                        send_message(chat_id, f"⚠️ {name} получил варн. Всего: {USERS[uid]['warnings']}")
-                        if USERS[uid]["warnings"] >= 3:
-                            USERS[uid]["banned"] = True
-                            save_users(USERS)
-                            send_message(chat_id, f"🔨 {name} забанен за 3 варна!")
-                        return 'ok', 200
             
             # Изменение репутации
             match = re.search(r'репутацию\s+(\w+)\s+(\d+)', clean_text.lower())
             if match:
                 name = match.group(1)
                 new_rep = int(match.group(2))
-                for uid, data in USERS.items():
-                    if data.get("name", "").lower() == name:
-                        update_reputation(uid, new_rep - data["reputation"], f"команда админа")
+                # Ищем пользователя по имени
+                all_users = supabase.table("users").select("*").execute()
+                for u in all_users.data:
+                    if u.get("name", "").lower() == name:
+                        update_reputation(u["user_id"], new_rep - u.get("reputation", 50), "команда админа")
                         send_message(chat_id, f"✅ Репутация {name} изменена на {new_rep}")
                         return 'ok', 200
         
-        # Быстрые команды
+        # Проверка на мат
+        swear_response = analyze_swear(clean_text)
+        if swear_response:
+            update_reputation(user_id, -5, "мат")
+            send_message(chat_id, swear_response)
+            return 'ok', 200
+        
+        # Команды
         if clean_text.lower() in ["дата", "какое сегодня число"]:
             send_message(chat_id, datetime.now(MSK).strftime("%d.%m.%Y"))
             return 'ok', 200
@@ -439,59 +317,43 @@ def webhook():
             send_message(chat_id, datetime.now(MSK).strftime("%H:%M"))
             return 'ok', 200
         if clean_text.lower() == "кто я":
-            user = USERS.get(user_id, {"name": user_name, "role": "новичок", "reputation": 50})
-            send_message(chat_id, f"Ты {user['name']}, {user['role']}, реп {user['reputation']}")
+            user_data = get_user(user_id)
+            rep = user_data.get("reputation", 50) if user_data else 50
+            role = user_data.get("role", "новичок") if user_data else "новичок"
+            send_message(chat_id, f"Ты {user_name}, {role}, реп {rep}")
             return 'ok', 200
         if clean_text.lower() == "кто ты":
-            send_message(chat_id, "Я Агент Ада - помощник клана Ад. Разбираюсь в законах, ставлю реакции, выдаю наказания.")
+            send_message(chat_id, "Я Агент Ада. Мат на мат, добро на добро.")
             return 'ok', 200
-        if clean_text.lower() == "мои варны":
-            user = USERS.get(user_id, {})
-            send_message(chat_id, f"⚠️ У тебя {user.get('warnings', 0)} варнов. При 3 - бан.")
+        if clean_text.lower().startswith("запомни"):
+            memory_text = clean_text[7:].strip()
+            if memory_text:
+                add_to_memory(user_id, memory_text)
+                send_message(chat_id, f"✅ Запомнил: {memory_text}")
+            return 'ok', 200
+        if clean_text.lower() == "что я запомнил":
+            memory = get_memory(user_id)
+            if memory:
+                mem_text = "\n".join([f"• {m['time']}: {m['text'][:80]}" for m in memory[-10:]])
+                send_message(chat_id, f"📝 Твоя память:\n{mem_text}")
+            else:
+                send_message(chat_id, "Ты пока ничего не просил запомнить")
             return 'ok', 200
         
-        # === ДРУЖЕЛЮБНЫЙ ОТВЕТ ПО УМОЛЧАНИЮ ===
-        friendly_responses = [
-            f"Да, {user_name}? Чем помочь?",
-            f"Слушаю, {user_name}",
-            f"Что нужно, {user_name}?"
-        ]
+        # Основной ответ
+        response = get_ai_response(clean_text, user_id, user_name)
+        send_message(chat_id, response)
         
-        if len(clean_text) < 30:
-            send_message(chat_id, random.choice(friendly_responses))
-            return 'ok', 200
-        
-        # Основной ответ через AI
-        try:
-            prompt = f"""Ты Агент Ада. {user_name} говорит: {clean_text}
-            
-Ответь коротко (1-2 предложения) по-русски, дружелюбно. Без мата, если не оскорбляют."""
-            
-            response = groq_client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.9,
-                max_tokens=150
-            )
-            answer = response.choices[0].message.content
-        except Exception as e:
-            logger.error(f"AI error: {e}")
-            answer = random.choice(friendly_responses)
-        
-        send_message(chat_id, answer)
         return 'ok', 200
-        
     except Exception as e:
-        logger.error(f"Webhook error: {e}")
+        logger.error(f"Error: {e}")
         return 'ok', 200
 
 @app.route('/')
 def index():
-    return '🤖 Агент Ада работает по законам клана!', 200
+    return '🤖 Агент Ада работает с Supabase!', 200
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
-    print("🚀 Агент Ада запущен!")
-    print(f"👥 В базе: {len(USERS)} человек")
-    print("⚖️ Работает по законам клана")
+    print("🚀 Агент Ада запущен с Supabase!")
     app.run(host='0.0.0.0', port=port)

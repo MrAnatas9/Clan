@@ -4,30 +4,28 @@ import requests
 import re
 import json
 import random
+import threading
+import time
 from datetime import datetime, timezone, timedelta
 from flask import Flask, request
 from groq import Groq
 
+# === КОНФИГУРАЦИЯ ===
 TELEGRAM_TOKEN = "8626951455:AAED7EIVu45vrpDxFkMDzVHYh7ymK77WWgw"
 GROQ_API_KEY = "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"
 ADMIN_ID = 6495178643
 GROQ_MODEL = "llama-3.3-70b-versatile"
+BOT_USERNAME = "@agentHell_bot"  # Исправленный юзернейм
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 app = Flask(__name__)
 MSK = timezone(timedelta(hours=3))
-bot_mute = False
 
-# === ПОЛНЫЕ ЗАКОНЫ КЛАНА ===
-RULES = """
-Законы Ада:
-- Предательство → вечное изгнание
-- Оскорбления → мут 30 мин - 1 час
-- Спам и флуд → мут 30 мин + варн
-- Бунт → изгнание
-"""
+# === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
+bot_mute = False
+bot_url = "https://clan-oiiw.onrender.com"  # ТВОЙ URL
 
 # === БАЗА ДАННЫХ ===
 USERS_FILE = "users.json"
@@ -69,6 +67,24 @@ if not USERS:
     }
     save_users(USERS)
 
+# === ФУНКЦИИ ДЛЯ KEEP-ALIVE ===
+def self_ping():
+    """Пингует самого себя каждые 4 минуты, чтобы Render не усыплял"""
+    while True:
+        time.sleep(240)  # 4 минуты
+        try:
+            requests.get(f"{bot_url}/ping", timeout=10)
+            logger.info("Self-ping executed")
+        except Exception as e:
+            logger.error(f"Ping error: {e}")
+
+def keep_alive():
+    """Запускает поток пинга"""
+    ping_thread = threading.Thread(target=self_ping, daemon=True)
+    ping_thread.start()
+    logger.info("Keep-alive thread started")
+
+# === TELEGRAM ФУНКЦИИ ===
 def send_message(chat_id, text, reply_to=None):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -120,6 +136,15 @@ def save_dialog_message(user_id, user_msg, bot_response):
         CHAT_MEMORY[user_id] = CHAT_MEMORY[user_id][-30:]
     save_memory(CHAT_MEMORY)
 
+# === AI ОТВЕТ ===
+RULES = """
+Законы Ада:
+- Предательство → вечное изгнание
+- Оскорбления → мут 30 мин - 1 час
+- Спам и флуд → мут 30 мин + варн
+- Бунт → изгнание
+"""
+
 def get_ai_response(text, user_id, user_name, is_admin=False, insult_count=0):
     try:
         user_info = USERS.get(user_id, {"name": user_name, "role": "участник", "reputation": 50})
@@ -132,13 +157,14 @@ def get_ai_response(text, user_id, user_name, is_admin=False, insult_count=0):
                 history_text += f"Пользователь: {h['user']}\nБот: {h['bot']}\n"
         
         if is_admin:
-            tone = "УВАЖИТЕЛЬНО. Ты общаешься с Анатасом - главой и создателем. Выполняй команды, не груби."
+            tone = "УВАЖИТЕЛЬНО. Ты общаешься с Анатасом - главой и создателем."
         elif insult_count >= 3:
             tone = "АГРЕССИВНО. Пользователь тебя оскорблял. Отвечай резко."
         else:
             tone = "ДРУЖЕЛЮБНО. Отвечай вежливо, помогай."
         
-        prompt = f"""Ты Агент Ада. Законы (используй ТОЛЬКО когда спрашивают):
+        prompt = f"""Ты Агент Ада.
+
 {RULES}
 
 {history_text}
@@ -146,13 +172,7 @@ def get_ai_response(text, user_id, user_name, is_admin=False, insult_count=0):
 Сейчас пишет: {user_info['name']} ({user_info['role']}, реп {user_info['reputation']})
 Сообщение: {text}
 
-ПРАВИЛА:
-1. Учитывай ИСТОРИЮ ДИАЛОГА
-2. Не повторяйся
-3. Если не знаешь - скажи "не знаю"
-4. Тон: {tone}
-5. Отвечай коротко (1-2 предложения)
-6. Не упоминай законы без необходимости"""
+Отвечай коротко (1-2 предложения). Тон: {tone}"""
 
         response = groq_client.chat.completions.create(
             model=GROQ_MODEL,
@@ -165,6 +185,7 @@ def get_ai_response(text, user_id, user_name, is_admin=False, insult_count=0):
         logger.error(f"AI error: {e}")
         return "Не понял"
 
+# === FLASK ЭНДПОИНТЫ ===
 @app.route('/webhook', methods=['POST'])
 def webhook():
     global bot_mute
@@ -189,6 +210,7 @@ def webhook():
         
         is_admin = (user_id == str(ADMIN_ID))
         
+        # Админ-команды
         if is_admin:
             if text.lower() in ["молчать", "молчи"]:
                 bot_mute = True
@@ -212,17 +234,19 @@ def webhook():
         if bot_mute:
             return 'ok', 200
         
+        # Обращение к боту
         is_private = str(msg['chat']['type']) == 'private'
         is_reply = msg.get('reply_to_message') and msg['reply_to_message'].get('from', {}).get('is_bot')
-        is_mention = "@agent_bot" in text or "агент" in text.lower()
+        is_mention = "@agent_bot" in text or "@agentHell_bot" in text or "агент" in text.lower()
         
         if not (is_private or is_reply or is_mention):
             return 'ok', 200
         
-        clean_text = text.replace("@agent_bot", "").replace("агент", "").strip()
+        clean_text = text.replace("@agent_bot", "").replace("@agentHell_bot", "").replace("агент", "").strip()
         if not clean_text:
             clean_text = text
         
+        # Оскорбления
         if not is_admin:
             insult_word = analyze_insult(clean_text)
             if insult_word:
@@ -230,11 +254,13 @@ def webhook():
                 update_reputation(user_id, -2, "оскорбление")
                 send_reaction(chat_id, message_id, "👿")
         
+        # Реакции
         if any(w in clean_text.lower() for w in ["спасибо", "молодец"]):
             send_reaction(chat_id, message_id, "👍")
         elif any(w in clean_text.lower() for w in ["круто", "🔥"]):
             send_reaction(chat_id, message_id, "🔥")
         
+        # Быстрые команды
         if clean_text.lower() in ["дата", "какое сегодня число"]:
             send_message(chat_id, datetime.now(MSK).strftime("%d.%m.%Y"), message_id)
             return 'ok', 200
@@ -254,6 +280,7 @@ def webhook():
                 send_message(chat_id, "Пока ничего не помню", message_id)
             return 'ok', 200
         
+        # Основной ответ
         insult_count = USERS[user_id].get("insult_count", 0)
         response = get_ai_response(clean_text, user_id, user_name, is_admin, insult_count)
         send_message(chat_id, response, message_id)
@@ -264,11 +291,17 @@ def webhook():
         logger.error(f"Error: {e}")
         return 'ok', 200
 
+@app.route('/ping')
+def ping():
+    """Эндпоинт для keep-alive"""
+    return 'pong', 200
+
 @app.route('/')
 def index():
-    return '🤖 Агент Ада работает!', 200
+    return '🤖 Агент Ада работает 24/7!', 200
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
-    print("🚀 Агент Ада запущен!")
+    keep_alive()  # Запускаем поток пинга
+    print("🚀 Агент Ада запущен с Keep-Alive!")
     app.run(host='0.0.0.0', port=port)

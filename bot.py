@@ -9,7 +9,7 @@ from flask import Flask, request
 from groq import Groq
 
 TELEGRAM_TOKEN = "8626951455:AAED7EIVu45vrpDxFkMDzVHYh7ymK77WWgw"
-GROQ_API_KEY = "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"
+GROQ_API_KEY = "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"
 ADMIN_ID = 6495178643
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
@@ -104,7 +104,6 @@ def update_reputation(user_id, change, reason):
     return new_rep
 
 def get_dialog_history(user_id, limit=8):
-    """Возвращает историю диалога с пользователем"""
     if user_id not in CHAT_MEMORY:
         return []
     return CHAT_MEMORY[user_id][-limit:]
@@ -125,15 +124,13 @@ def get_ai_response(text, user_id, user_name, is_admin=False, insult_count=0):
     try:
         user_info = USERS.get(user_id, {"name": user_name, "role": "участник", "reputation": 50})
         
-        # Получаем историю диалога
         history = get_dialog_history(user_id, 6)
         history_text = ""
         if history:
-            history_text = "ИСТОРИЯ ДИАЛОГА (ПОСЛЕДНИЕ СООБЩЕНИЯ):\n"
+            history_text = "ИСТОРИЯ ДИАЛОГА:\n"
             for h in history[-4:]:
                 history_text += f"Пользователь: {h['user']}\nБот: {h['bot']}\n"
         
-        # Определяем тон
         if is_admin:
             tone = "УВАЖИТЕЛЬНО. Ты общаешься с Анатасом - главой и создателем. Выполняй команды, не груби."
         elif insult_count >= 3:
@@ -141,7 +138,7 @@ def get_ai_response(text, user_id, user_name, is_admin=False, insult_count=0):
         else:
             tone = "ДРУЖЕЛЮБНО. Отвечай вежливо, помогай."
         
-        prompt = f"""Ты Агент Ада. Вот законы (используй ТОЛЬКО когда спрашивают):
+        prompt = f"""Ты Агент Ада. Законы (используй ТОЛЬКО когда спрашивают):
 {RULES}
 
 {history_text}
@@ -150,8 +147,8 @@ def get_ai_response(text, user_id, user_name, is_admin=False, insult_count=0):
 Сообщение: {text}
 
 ПРАВИЛА:
-1. Учитывай ИСТОРИЮ ДИАЛОГА - помни что говорил пользователь и ты
-2. Не повторяйся, будь естественным
+1. Учитывай ИСТОРИЮ ДИАЛОГА
+2. Не повторяйся
 3. Если не знаешь - скажи "не знаю"
 4. Тон: {tone}
 5. Отвечай коротко (1-2 предложения)
@@ -186,14 +183,12 @@ def webhook():
         if not text:
             return 'ok', 200
         
-        # Новый пользователь
         if user_id not in USERS:
             USERS[user_id] = {"name": user_name, "role": "новичок", "reputation": 50, "insult_count": 0}
             save_users(USERS)
         
         is_admin = (user_id == str(ADMIN_ID))
         
-        # === АДМИН-КОМАНДЫ ===
         if is_admin:
             if text.lower() in ["молчать", "молчи"]:
                 bot_mute = True
@@ -217,7 +212,6 @@ def webhook():
         if bot_mute:
             return 'ok', 200
         
-        # === ПРОВЕРКА ОБРАЩЕНИЯ ===
         is_private = str(msg['chat']['type']) == 'private'
         is_reply = msg.get('reply_to_message') and msg['reply_to_message'].get('from', {}).get('is_bot')
         is_mention = "@agent_bot" in text or "агент" in text.lower()
@@ -229,7 +223,6 @@ def webhook():
         if not clean_text:
             clean_text = text
         
-        # === ОСКОРБЛЕНИЯ ===
         if not is_admin:
             insult_word = analyze_insult(clean_text)
             if insult_word:
@@ -237,15 +230,11 @@ def webhook():
                 update_reputation(user_id, -2, "оскорбление")
                 send_reaction(chat_id, message_id, "👿")
         
-        # === РЕАКЦИИ ===
         if any(w in clean_text.lower() for w in ["спасибо", "молодец"]):
             send_reaction(chat_id, message_id, "👍")
         elif any(w in clean_text.lower() for w in ["круто", "🔥"]):
             send_reaction(chat_id, message_id, "🔥")
-        elif any(w in clean_text.lower() for w in ["шутка", "хаха"]):
-            send_reaction(chat_id, message_id, "😂")
         
-        # === БЫСТРЫЕ КОМАНДЫ ===
         if clean_text.lower() in ["дата", "какое сегодня число"]:
             send_message(chat_id, datetime.now(MSK).strftime("%d.%m.%Y"), message_id)
             return 'ok', 200
@@ -260,17 +249,14 @@ def webhook():
             history = get_dialog_history(user_id, 10)
             if history:
                 mem_text = "\n".join([f"{h['time']}: {h['user'][:50]}" for h in history[-5:]])
-                send_message(chat_id, f"📝 Последние темы разговора:\n{mem_text}", message_id)
+                send_message(chat_id, f"📝 Последние темы:\n{mem_text}", message_id)
             else:
                 send_message(chat_id, "Пока ничего не помню", message_id)
             return 'ok', 200
         
-        # === ОСНОВНОЙ ОТВЕТ ===
         insult_count = USERS[user_id].get("insult_count", 0)
         response = get_ai_response(clean_text, user_id, user_name, is_admin, insult_count)
         send_message(chat_id, response, message_id)
-        
-        # Сохраняем в память
         save_dialog_message(user_id, clean_text, response)
         
         return 'ok', 200

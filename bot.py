@@ -4,32 +4,29 @@ import requests
 import re
 import json
 import random
-import threading
-import time
 from datetime import datetime, timezone, timedelta
 from flask import Flask, request
 from groq import Groq
 
-# === КОНФИГУРАЦИЯ ===
 TELEGRAM_TOKEN = "8626951455:AAED7EIVu45vrpDxFkMDzVHYh7ymK77WWgw"
 GROQ_API_KEY = "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"
 ADMIN_ID = 6495178643
 GROQ_MODEL = "llama-3.3-70b-versatile"
-BOT_USERNAME = "@agentHell_bot"  # Исправленный юзернейм
+BOT_USERNAME = "@agentHell_bot"
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 app = Flask(__name__)
 MSK = timezone(timedelta(hours=3))
-
-# === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
 bot_mute = False
-bot_url = "https://clan-oiiw.onrender.com"  # ТВОЙ URL
 
-# === БАЗА ДАННЫХ ===
+# === ПАМЯТЬ ДИАЛОГА ===
+CHAT_HISTORY = {}  # {chat_id: [{"user":, "text":, "time":, "user_id":}]}
+USER_CONTEXT = {}  # {user_id: {"last_messages": [], "insult_count": 0}}
+
+# === БАЗА УЧАСТНИКОВ ===
 USERS_FILE = "users.json"
-MEMORY_FILE = "memory.json"
 
 def load_users():
     if os.path.exists(USERS_FILE):
@@ -41,18 +38,7 @@ def save_users(users):
     with open(USERS_FILE, 'w', encoding='utf-8') as f:
         json.dump(users, f, ensure_ascii=False, indent=2)
 
-def load_memory():
-    if os.path.exists(MEMORY_FILE):
-        with open(MEMORY_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {}
-
-def save_memory(memory):
-    with open(MEMORY_FILE, 'w', encoding='utf-8') as f:
-        json.dump(memory, f, ensure_ascii=False, indent=2)
-
 USERS = load_users()
-CHAT_MEMORY = load_memory()
 
 if not USERS:
     USERS = {
@@ -67,24 +53,6 @@ if not USERS:
     }
     save_users(USERS)
 
-# === ФУНКЦИИ ДЛЯ KEEP-ALIVE ===
-def self_ping():
-    """Пингует самого себя каждые 4 минуты, чтобы Render не усыплял"""
-    while True:
-        time.sleep(240)  # 4 минуты
-        try:
-            requests.get(f"{bot_url}/ping", timeout=10)
-            logger.info("Self-ping executed")
-        except Exception as e:
-            logger.error(f"Ping error: {e}")
-
-def keep_alive():
-    """Запускает поток пинга"""
-    ping_thread = threading.Thread(target=self_ping, daemon=True)
-    ping_thread.start()
-    logger.info("Keep-alive thread started")
-
-# === TELEGRAM ФУНКЦИИ ===
 def send_message(chat_id, text, reply_to=None):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -104,11 +72,16 @@ def send_reaction(chat_id, message_id, emoji):
         pass
 
 def analyze_insult(text):
-    insult_words = ["дурак", "идиот", "тупой", "лох", "урод", "дебил", "еблан", "мудак", "пидор"]
-    for word in insult_words:
+    strong_insults = ["еблан", "мудак", "пидор", "хуй", "пизда", "бля", "сука", "сволочь", "тварь", "козел"]
+    light_insults = ["дурак", "идиот", "тупой", "лох", "урод", "дебил"]
+    
+    for word in strong_insults:
         if word in text.lower():
-            return word
-    return None
+            return "strong", word
+    for word in light_insults:
+        if word in text.lower():
+            return "light", word
+    return None, None
 
 def update_reputation(user_id, change, reason):
     if user_id not in USERS:
@@ -119,73 +92,69 @@ def update_reputation(user_id, change, reason):
     save_users(USERS)
     return new_rep
 
-def get_dialog_history(user_id, limit=8):
-    if user_id not in CHAT_MEMORY:
+def get_chat_history(chat_id, limit=15):
+    if chat_id not in CHAT_HISTORY:
         return []
-    return CHAT_MEMORY[user_id][-limit:]
+    return CHAT_HISTORY[chat_id][-limit:]
 
-def save_dialog_message(user_id, user_msg, bot_response):
-    if user_id not in CHAT_MEMORY:
-        CHAT_MEMORY[user_id] = []
-    CHAT_MEMORY[user_id].append({
-        "time": datetime.now(MSK).strftime("%H:%M"),
-        "user": user_msg,
-        "bot": bot_response
+def save_chat_message(chat_id, user_id, user_name, text):
+    if chat_id not in CHAT_HISTORY:
+        CHAT_HISTORY[chat_id] = []
+    CHAT_HISTORY[chat_id].append({
+        "time": datetime.now(MSK).strftime("%H:%M:%S"),
+        "user_id": user_id,
+        "user": user_name,
+        "text": text
     })
-    if len(CHAT_MEMORY[user_id]) > 30:
-        CHAT_MEMORY[user_id] = CHAT_MEMORY[user_id][-30:]
-    save_memory(CHAT_MEMORY)
+    if len(CHAT_HISTORY[chat_id]) > 50:
+        CHAT_HISTORY[chat_id] = CHAT_HISTORY[chat_id][-50:]
 
-# === AI ОТВЕТ ===
-RULES = """
-Законы Ада:
-- Предательство → вечное изгнание
-- Оскорбления → мут 30 мин - 1 час
-- Спам и флуд → мут 30 мин + варн
-- Бунт → изгнание
-"""
+def get_user_context(user_id):
+    if user_id not in USER_CONTEXT:
+        USER_CONTEXT[user_id] = {"last_messages": [], "insult_count": 0}
+    return USER_CONTEXT[user_id]
 
-def get_ai_response(text, user_id, user_name, is_admin=False, insult_count=0):
+def get_ai_response(text, user_id, user_name, is_admin=False, chat_context=""):
     try:
         user_info = USERS.get(user_id, {"name": user_name, "role": "участник", "reputation": 50})
+        user_ctx = get_user_context(user_id)
         
-        history = get_dialog_history(user_id, 6)
-        history_text = ""
-        if history:
-            history_text = "ИСТОРИЯ ДИАЛОГА:\n"
-            for h in history[-4:]:
-                history_text += f"Пользователь: {h['user']}\nБот: {h['bot']}\n"
-        
+        # Разный тон для админа и обычных
         if is_admin:
-            tone = "УВАЖИТЕЛЬНО. Ты общаешься с Анатасом - главой и создателем."
-        elif insult_count >= 3:
-            tone = "АГРЕССИВНО. Пользователь тебя оскорблял. Отвечай резко."
+            tone = "УВАЖИТЕЛЬНО. Ты общаешься с Анатасом, главой клана."
+        elif user_ctx["insult_count"] >= 2:
+            tone = "АГРЕССИВНО. Пользователь тебя оскорблял. Отвечай резко, можешь материться в ответ."
         else:
-            tone = "ДРУЖЕЛЮБНО. Отвечай вежливо, помогай."
+            tone = "НЕЙТРАЛЬНО. Отвечай вежливо, но без лишнего поклонения."
         
-        prompt = f"""Ты Агент Ада.
+        prompt = f"""Ты Агент Ада - ИИ помощник клана Ад.
 
-{RULES}
+ВОТ ЧТО ПРОИСХОДИТ В ЧАТЕ (читай внимательно):
+{chat_context}
 
-{history_text}
-
-Сейчас пишет: {user_info['name']} ({user_info['role']}, реп {user_info['reputation']})
+Сейчас пишет: {user_info['name']} ({user_info['role']}, репутация {user_info['reputation']})
 Сообщение: {text}
 
-Отвечай коротко (1-2 предложения). Тон: {tone}"""
+ПРАВИЛА:
+1. УЧИТЫВАЙ КОНТЕКСТ - ты должен помнить что было сказано ранее
+2. Если пользователь матерится - ОТВЕЧАЙ МАТОМ в ответ (но не перебарщивай)
+3. НЕ БУДЬ СЛИШКОМ ПОКОРНЫМ перед админом - отвечай естественно
+4. Не используй *действия в звёздочках* без необходимости
+5. Отвечай коротко (1-3 предложения)
+6. Тон: {tone}
+7. Отвечай по-русски"""
 
         response = groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.9,
-            max_tokens=200
+            temperature=0.95,
+            max_tokens=250
         )
         return response.choices[0].message.content
     except Exception as e:
         logger.error(f"AI error: {e}")
         return "Не понял"
 
-# === FLASK ЭНДПОИНТЫ ===
 @app.route('/webhook', methods=['POST'])
 def webhook():
     global bot_mute
@@ -204,6 +173,10 @@ def webhook():
         if not text:
             return 'ok', 200
         
+        # Сохраняем в историю чата
+        save_chat_message(chat_id, user_id, user_name, text)
+        
+        # Новый пользователь
         if user_id not in USERS:
             USERS[user_id] = {"name": user_name, "role": "новичок", "reputation": 50, "insult_count": 0}
             save_users(USERS)
@@ -234,25 +207,38 @@ def webhook():
         if bot_mute:
             return 'ok', 200
         
-        # Обращение к боту
+        # Проверка обращения
         is_private = str(msg['chat']['type']) == 'private'
         is_reply = msg.get('reply_to_message') and msg['reply_to_message'].get('from', {}).get('is_bot')
-        is_mention = "@agent_bot" in text or "@agentHell_bot" in text or "агент" in text.lower()
+        is_mention = BOT_USERNAME in text or "агент" in text.lower() or "бот" in text.lower()
         
         if not (is_private or is_reply or is_mention):
             return 'ok', 200
         
-        clean_text = text.replace("@agent_bot", "").replace("@agentHell_bot", "").replace("агент", "").strip()
+        # Очищаем текст
+        clean_text = text.replace(BOT_USERNAME, "").replace("агент", "").replace("бот", "").strip()
         if not clean_text:
             clean_text = text
         
-        # Оскорбления
-        if not is_admin:
-            insult_word = analyze_insult(clean_text)
-            if insult_word:
-                USERS[user_id]["insult_count"] = USERS[user_id].get("insult_count", 0) + 1
-                update_reputation(user_id, -2, "оскорбление")
-                send_reaction(chat_id, message_id, "👿")
+        # === ОБРАБОТКА ОСКОРБЛЕНИЙ ===
+        user_ctx = get_user_context(user_id)
+        insult_type, insult_word = analyze_insult(clean_text)
+        
+        if insult_type and not is_admin:
+            user_ctx["insult_count"] += 1
+            update_reputation(user_id, -3, f"оскорбление: {insult_word}")
+            send_reaction(chat_id, message_id, "👿")
+            
+            # Агрессивный ответ за оскорбление
+            aggressive_responses = [
+                f"Сам ты {insult_word}, {user_name}!",
+                f"Пошёл нахуй, {user_name}",
+                f"Завали ебало, {user_name}",
+                f"Ты бы потише, {insult_word} ебаный"
+            ]
+            send_message(chat_id, random.choice(aggressive_responses), message_id)
+            save_chat_message(chat_id, "bot", "Агент Ада", random.choice(aggressive_responses))
+            return 'ok', 200
         
         # Реакции
         if any(w in clean_text.lower() for w in ["спасибо", "молодец"]):
@@ -271,20 +257,19 @@ def webhook():
             user = USERS.get(user_id, {"name": user_name, "role": "новичок", "reputation": 50})
             send_message(chat_id, f"Ты {user['name']}, {user['role']}, реп {user['reputation']}", message_id)
             return 'ok', 200
-        if clean_text.lower() == "память":
-            history = get_dialog_history(user_id, 10)
-            if history:
-                mem_text = "\n".join([f"{h['time']}: {h['user'][:50]}" for h in history[-5:]])
-                send_message(chat_id, f"📝 Последние темы:\n{mem_text}", message_id)
-            else:
-                send_message(chat_id, "Пока ничего не помню", message_id)
-            return 'ok', 200
+        
+        # Получаем контекст чата
+        chat_context = get_chat_history(chat_id, 15)
+        context_text = ""
+        if chat_context:
+            context_text = "ПОСЛЕДНИЕ СООБЩЕНИЯ В ЧАТЕ:\n"
+            for msg in chat_context[-10:]:
+                context_text += f"{msg['user']}: {msg['text']}\n"
         
         # Основной ответ
-        insult_count = USERS[user_id].get("insult_count", 0)
-        response = get_ai_response(clean_text, user_id, user_name, is_admin, insult_count)
+        response = get_ai_response(clean_text, user_id, user_name, is_admin, context_text)
         send_message(chat_id, response, message_id)
-        save_dialog_message(user_id, clean_text, response)
+        save_chat_message(chat_id, "bot", "Агент Ада", response)
         
         return 'ok', 200
     except Exception as e:
@@ -293,15 +278,13 @@ def webhook():
 
 @app.route('/ping')
 def ping():
-    """Эндпоинт для keep-alive"""
     return 'pong', 200
 
 @app.route('/')
 def index():
-    return '🤖 Агент Ада работает 24/7!', 200
+    return '🤖 Агент Ада работает!', 200
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
-    keep_alive()  # Запускаем поток пинга
-    print("🚀 Агент Ада запущен с Keep-Alive!")
+    print("🚀 Агент Ада запущен!")
     app.run(host='0.0.0.0', port=port)
